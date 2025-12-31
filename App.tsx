@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   GameConfig, GameState, SkierLevel, Facility, Point, TrailDifficulty, 
@@ -11,6 +12,9 @@ import GameCanvas from './components/GameCanvas';
 import Dashboard from './components/Dashboard';
 import Controls from './components/Controls';
 import { GoogleGenAI } from "@google/genai";
+
+// Sample placeholder if user just wants to play quickly
+const SAMPLE_BG_URL = "https://images.unsplash.com/photo-1551524559-8af4e669d17d?q=80&w=2670&auto=format&fit=crop";
 
 type GamePhase = 'init' | 'drawing' | 'playing';
 
@@ -59,6 +63,9 @@ const App: React.FC = () => {
   // Drawing Mode State
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
+
+  // Refs for file input
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const centerView = useCallback((targetX?: number, targetY?: number) => {
     // Grid center in pixels (default or target)
@@ -154,8 +161,11 @@ const App: React.FC = () => {
     setGamePhase('init');
     setDrawingPoints([]);
 
+    setIsGenerating(true);
+    setGenStep("Checking API Key...");
+
     // Step 0: Ensure API Key Selection
-    // This is crucial for Pro models to avoid 500 errors related to billing/auth in some environments
+    // This is crucial for Pro models.
     if ((window as any).aistudio) {
       try {
         const hasKey = await (window as any).aistudio.hasSelectedApiKey();
@@ -167,75 +177,94 @@ const App: React.FC = () => {
       }
     }
 
-    if (!process.env.API_KEY) {
-      // No API Key - Skip to drawing on blank/fallback background
-      console.log("No API Key found, skipping AI generation.");
-      setGamePhase('drawing');
-      setIsDrawing(true);
-      return;
-    }
-
-    setIsGenerating(true);
     setGenStep("Creating Map Visuals...");
     
-    try {
-      // Re-init client to pick up any newly selected key
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      
-      // Step 1: Generate Image
-      // Using gemini-3-pro-image-preview for higher stability and quality
-      const generateImage = async () => {
-        return await ai.models.generateContent({
-          model: 'gemini-3-pro-image-preview',
-          contents: {
-            parts: [
-              { text: "A high-angle frontal view (orthographic/isometric style) of a massive snowy ski resort. Foreground: 3 main snow-covered mountain slopes with sharp peaks and wide bases, completely clean (white snow only) for game overlay. Background: A rich scenic environment including a large blue lake at the bottom, a smoking volcano in the distance, and surrounding mountain ranges. Style: 4k, vivid colors, detailed landscape art. NOT a bird's eye view. STRICTLY NO TREES or LIFTS on the main 3 mountains." }
-            ]
-          },
-          config: {
-            imageConfig: { 
-              aspectRatio: "16:9",
-              imageSize: "2K" // Better quality/performance balance
+    // Function to run the generation, allowing for a retry if key is bad
+    const runGeneration = async (retryAttempt: boolean): Promise<string> => {
+       try {
+          // Re-init client to pick up any newly selected key
+          // IMPORTANT: Create new instance right before call
+          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+          
+          const response = await ai.models.generateContent({
+            model: 'gemini-3-pro-image-preview',
+            contents: {
+              parts: [
+                { text: "A high-angle frontal view (orthographic/isometric style) of a massive snowy ski resort. Foreground: 3 main snow-covered mountain slopes with sharp peaks and wide bases, completely clean (white snow only) for game overlay. Background: A rich scenic environment including a large blue lake at the bottom, a smoking volcano in the distance, and surrounding mountain ranges. Style: 4k, vivid colors, detailed landscape art. NOT a bird's eye view. STRICTLY NO TREES or LIFTS on the main 3 mountains." }
+              ]
+            },
+            config: {
+              imageConfig: { 
+                aspectRatio: "16:9",
+                imageSize: "2K"
+              }
+            }
+          });
+
+          let base64 = "";
+          if (response.candidates?.[0]?.content?.parts) {
+            for (const part of response.candidates[0].content.parts) {
+              if (part.inlineData) {
+                base64 = part.inlineData.data;
+                break;
+              }
             }
           }
-        });
-      };
+          if (!base64) throw new Error("No image data in response");
+          return base64;
 
-      let imageResp;
-      try {
-        imageResp = await generateImage();
-      } catch (err) {
-        console.warn("First image generation attempt failed, retrying...", err);
-        // Simple retry mechanism for robustness
-        imageResp = await generateImage();
-      }
+       } catch (error: any) {
+          console.error("AI Generation Failed", error);
 
-      let base64Image = "";
-      if (imageResp.candidates?.[0]?.content?.parts) {
-        for (const part of imageResp.candidates[0].content.parts) {
-          if (part.inlineData) {
-            base64Image = part.inlineData.data;
-            break;
+          let isPermission = false;
+          let isNotFound = false;
+          
+          const str = error.toString().toLowerCase();
+          const json = JSON.stringify(error).toLowerCase();
+          
+          if (str.includes("403") || str.includes("permission_denied") || json.includes("permission_denied")) isPermission = true;
+          if (str.includes("404") || str.includes("not found") || json.includes("not found")) isNotFound = true;
+          // Check explicit error structure from GoogleGenAI
+          if (error.error?.code === 403 || error.status === 403) isPermission = true;
+
+          if ((isPermission || isNotFound) && !retryAttempt && (window as any).aistudio) {
+             console.log("Permission/Auth error detected. Prompting for new key...");
+             setGenStep("Please select a valid API Key...");
+             await (window as any).aistudio.openSelectKey();
+             setGenStep("Retrying Generation...");
+             // Recursively call with retryAttempt = true
+             return await runGeneration(true);
           }
-        }
+          throw error;
+       }
+    };
+
+    try {
+      if (!process.env.API_KEY) {
+         console.log("No API Key found initially.");
+         // Try to open key selector if available, otherwise just fail to manual
+         if ((window as any).aistudio) {
+            await (window as any).aistudio.openSelectKey();
+         }
       }
+
+      // If still no key after prompt, runGeneration will likely fail, caught below.
+      const base64Image = await runGeneration(false);
 
       if (base64Image) {
         setBgImage(`data:image/png;base64,${base64Image}`);
         setGenStep("Ready to Draw!");
         await new Promise(r => setTimeout(r, 500));
-      } else {
-        throw new Error("No image data received from API");
       }
 
     } catch (e: any) {
       console.error("Map Gen Error:", e);
-      // Fallback: Proceed to drawing mode even if image gen fails
-      setMessage(`AI Map Gen failed (${e.message || 'Error'}). Switching to manual drawing.`);
+      // Construct friendly error message
+      const errStr = e.message || e.toString();
+      setMessage(`AI Map Gen failed. Switching to manual drawing.`);
     } finally {
       setIsGenerating(false);
       setGenStep("");
-      // ALWAYS enter drawing phase
       setGamePhase('drawing');
       setIsDrawing(true);
     }
@@ -295,6 +324,40 @@ const App: React.FC = () => {
   const handleCreateNew = () => {
     setShowLoadScreen(false);
     generateAndAnalyzeMap();
+  };
+
+  const handleUseSample = () => {
+    // Reset Game State for new map
+    setGameState(prev => ({ ...prev, skiers: [], facilities: [], trees: [], coins: 500, promotedCount: 0 }));
+    setConfig(prev => ({ ...prev, mountains: [] }));
+    setBgImage(SAMPLE_BG_URL);
+    setShowLoadScreen(false);
+    setGamePhase('drawing');
+    setIsDrawing(true);
+    setDrawingPoints([]);
+  };
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+        if (evt.target?.result) {
+            setGameState(prev => ({ ...prev, skiers: [], facilities: [], trees: [], coins: 500, promotedCount: 0 }));
+            setConfig(prev => ({ ...prev, mountains: [] }));
+            setBgImage(evt.target.result as string);
+            setShowLoadScreen(false);
+            setGamePhase('drawing');
+            setIsDrawing(true);
+            setDrawingPoints([]);
+        }
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleDeleteMap = async (id: string, e: React.MouseEvent) => {
@@ -564,7 +627,14 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden text-slate-800 font-sans relative">
-      
+      <input 
+         type="file" 
+         ref={fileInputRef} 
+         onChange={handleFileChange} 
+         accept="image/*" 
+         className="hidden" 
+      />
+
       {/* INITIAL LOAD SCREEN */}
       {showLoadScreen && (
         <div className="absolute inset-0 bg-slate-800 z-[100] flex flex-col items-center justify-center text-white p-8">
@@ -611,11 +681,35 @@ const App: React.FC = () => {
                  </div>
               </div>
 
-              {/* Right: New Map */}
-              <div className="w-1/3 bg-blue-600/20 border-2 border-dashed border-blue-500/50 rounded-xl p-6 flex flex-col items-center justify-center hover:bg-blue-600/30 transition-all cursor-pointer" onClick={handleCreateNew}>
-                  <div className="text-6xl mb-4">🏔️</div>
-                  <h2 className="text-2xl font-bold text-blue-200">Create New Map</h2>
-                  <p className="text-center text-blue-200/60 mt-2">Use AI to generate a unique mountain landscape and define your own boundaries.</p>
+              {/* Right: New Map Options */}
+              <div className="w-1/3 flex flex-col gap-4">
+                  {/* Option 1: AI Gen */}
+                  <div 
+                    onClick={handleCreateNew}
+                    className="flex-1 bg-blue-600/20 border-2 border-dashed border-blue-500/50 rounded-xl p-6 flex flex-col items-center justify-center hover:bg-blue-600/30 transition-all cursor-pointer"
+                  >
+                      <div className="text-6xl mb-4">🏔️</div>
+                      <h2 className="text-2xl font-bold text-blue-200">AI Generate Map</h2>
+                      <p className="text-center text-blue-200/60 mt-2 text-sm">Create unique landscapes with Gemini 3 Pro.</p>
+                  </div>
+
+                  {/* Option 2 & 3: Sample / Upload */}
+                  <div className="h-1/3 flex gap-4">
+                     <div 
+                       onClick={handleUseSample}
+                       className="flex-1 bg-slate-700/50 hover:bg-slate-600 rounded-xl border border-slate-600 p-4 flex flex-col items-center justify-center cursor-pointer transition-colors"
+                     >
+                        <div className="text-3xl mb-2">🖼️</div>
+                        <span className="font-bold text-sm">Use Sample</span>
+                     </div>
+                     <div 
+                       onClick={handleUploadClick}
+                       className="flex-1 bg-slate-700/50 hover:bg-slate-600 rounded-xl border border-slate-600 p-4 flex flex-col items-center justify-center cursor-pointer transition-colors"
+                     >
+                        <div className="text-3xl mb-2">📂</div>
+                        <span className="font-bold text-sm">Upload Image</span>
+                     </div>
+                  </div>
               </div>
            </div>
         </div>

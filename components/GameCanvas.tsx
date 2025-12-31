@@ -1,4 +1,5 @@
-import React, { useRef, useState, useEffect } from 'react';
+
+import React, { useRef, useState, useEffect, useMemo } from 'react';
 import { GameConfig, GameState, Point, Facility, Skier, FacilityType, TrailDifficulty, SkierLevel, LiftType } from '../types';
 import { COLORS, GRID_SIZE, LIFT_SPEED, GONDOLA_SPEED, LIFT_WIDTHS, getLiftNumChairs, getLiftCapacity } from '../constants';
 import { 
@@ -22,6 +23,63 @@ interface GameCanvasProps {
   isDrawing?: boolean;
   drawingPoints?: Point[];
 }
+
+// --- Memoized Layers for Performance ---
+
+const TreeLayer = React.memo(({ trees }: { trees: Point[] }) => (
+  <g pointerEvents="none">
+    {trees.map((t, i) => (
+       <use 
+         key={`tree-${i}`}
+         href="#tree-vivid"
+         x={t.x * GRID_SIZE}
+         y={t.y * GRID_SIZE}
+         opacity={0.95}
+       />
+    ))}
+  </g>
+));
+
+const MountainLayer = React.memo(({ mountains, hasBackground }: { mountains: Point[][], hasBackground: boolean }) => (
+  <g pointerEvents="none">
+    {mountains.map((poly, i) => (
+        <polygon 
+          key={`mtn-${i}`} 
+          points={poly.map(p => `${p.x * GRID_SIZE},${p.y * GRID_SIZE}`).join(' ')} 
+          fill={hasBackground ? "none" : "#cbd5e1"} 
+          stroke={hasBackground ? "rgba(255, 255, 255, 0.4)" : "none"}
+          strokeWidth={hasBackground ? 2 : 0}
+          strokeDasharray={hasBackground ? "10,10" : ""}
+          opacity={hasBackground ? 0.5 : 0.6}
+        />
+    ))}
+  </g>
+));
+
+const GridLayer = React.memo(({ width, height, hasBackground }: { width: number, height: number, hasBackground: boolean }) => (
+  <g opacity={hasBackground ? 0.05 : 0.1} pointerEvents="none">
+     {Array.from({ length: width }).map((_, i) => (
+       <line key={`v-${i}`} x1={i * GRID_SIZE} y1={0} x2={i * GRID_SIZE} y2={height * GRID_SIZE} stroke="black" strokeWidth={1} />
+     ))}
+     {Array.from({ length: height }).map((_, i) => (
+       <line key={`h-${i}`} x1={0} y1={i * GRID_SIZE} x2={width * GRID_SIZE} y2={i * GRID_SIZE} stroke="black" strokeWidth={1} />
+     ))}
+  </g>
+));
+
+const BackgroundLayer = React.memo(({ image, width, height }: { image: string, width: number, height: number }) => (
+  <image 
+      href={image} 
+      x={0} 
+      y={0} 
+      width={width * GRID_SIZE} 
+      height={height * GRID_SIZE} 
+      preserveAspectRatio="none"
+      opacity={0.9}
+  />
+));
+
+// --- Main Component ---
 
 const GameCanvas: React.FC<GameCanvasProps> = ({
   config, gameState, viewX, viewY, zoom, buildingMode, onMapClick, onMapHover, onViewChange, hoverPoint, dragStart, backgroundImage,
@@ -159,7 +217,10 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
        finalY = Math.round(finalY);
     }
     
-    onMapHover({ x: finalX, y: finalY });
+    // Only update if changed significantly (optimization)
+    if (!hoverPoint || Math.abs(hoverPoint.x - finalX) > 0.01 || Math.abs(hoverPoint.y - finalY) > 0.01) {
+       onMapHover({ x: finalX, y: finalY });
+    }
   };
 
   const handleMouseUp = () => {
@@ -206,41 +267,16 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
 
         <g transform={`scale(${zoom}) translate(${-viewX}, ${-viewY})`}>
           
-          {/* AI Background Image */}
+          {/* Layer 0: Background Image */}
           {backgroundImage && (
-            <image 
-               href={backgroundImage} 
-               x={0} 
-               y={0} 
-               width={config.gridWidth * GRID_SIZE} 
-               height={config.gridHeight * GRID_SIZE} 
-               preserveAspectRatio="none"
-               opacity={0.9}
-            />
+             <BackgroundLayer image={backgroundImage} width={config.gridWidth} height={config.gridHeight} />
           )}
 
-          {/* Grid (More subtle if image is present) */}
-          <g opacity={backgroundImage ? 0.05 : 0.1}>
-             {Array.from({ length: config.gridWidth }).map((_, i) => (
-               <line key={`v-${i}`} x1={i * GRID_SIZE} y1={0} x2={i * GRID_SIZE} y2={config.gridHeight * GRID_SIZE} stroke="black" strokeWidth={1} />
-             ))}
-             {Array.from({ length: config.gridHeight }).map((_, i) => (
-               <line key={`h-${i}`} x1={0} y1={i * GRID_SIZE} x2={config.gridWidth * GRID_SIZE} y2={i * GRID_SIZE} stroke="black" strokeWidth={1} />
-             ))}
-          </g>
+          {/* Layer 0.1: Grid */}
+          <GridLayer width={config.gridWidth} height={config.gridHeight} hasBackground={!!backgroundImage} />
 
-          {/* Mountains (Logical Boundary Visualization) */}
-          {config.mountains.map((poly, i) => (
-            <polygon 
-              key={`mtn-${i}`} 
-              points={poly.map(p => `${p.x * GRID_SIZE},${p.y * GRID_SIZE}`).join(' ')} 
-              fill={backgroundImage ? "none" : "#cbd5e1"} 
-              stroke={backgroundImage ? "rgba(255, 255, 255, 0.4)" : "none"}
-              strokeWidth={backgroundImage ? 2 : 0}
-              strokeDasharray={backgroundImage ? "10,10" : ""}
-              opacity={backgroundImage ? 0.5 : 0.6}
-            />
-          ))}
+          {/* Layer 0.2: Mountains */}
+          <MountainLayer mountains={config.mountains} hasBackground={!!backgroundImage} />
 
           {/* DRAWING MODE VISUALIZATION */}
           {isDrawing && drawingPoints && (
@@ -275,18 +311,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
             </g>
           )}
 
-          {/* Layer 0.5: Trees - using the Vivid Tree Definition */}
-          {gameState.trees.map((t, i) => (
-             <use 
-               key={`tree-${i}`}
-               href="#tree-vivid"
-               x={t.x * GRID_SIZE}
-               y={t.y * GRID_SIZE}
-               // Slight random scale/rotation could be added here via transform if desired, 
-               // but simpler to just place for perf.
-               opacity={0.95}
-             />
-          ))}
+          {/* Layer 0.5: Trees - MEMOIZED */}
+          <TreeLayer trees={gameState.trees} />
 
           {/* LAYER 2: Facilities */}
           {gameState.facilities.map(f => {
@@ -413,9 +439,6 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
                   const progress = (baseProgress + i * spacing) % 1;
                   const pos = getPointOnLine(f.start, f.end, progress);
                   
-                  // Check if occupied by a skier, but logic handles skier drawing separately.
-                  // This is just the empty chair structure.
-                  
                   if (isGondola) {
                     return (
                       <g key={`seat-${i}`} transform={`translate(${pos.x * GRID_SIZE}, ${pos.y * GRID_SIZE})`}>
@@ -517,14 +540,15 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
                   } else {
                     // Calculate seat offset for Chairlifts
                     const capacity = getLiftCapacity(f.subType as string);
-                    const chairWidth = LIFT_WIDTHS[f.subType as LiftType] || 12;
+                    // const chairWidth = LIFT_WIDTHS[f.subType as LiftType] || 12; // Unused here
                     
                     // Vector perpedicular to line
                     const dx = f.end.x - f.start.x;
                     const dy = f.end.y - f.start.y;
                     const len = Math.sqrt(dx*dx + dy*dy) || 1;
-                    const nx = -dy / len;
+                    // const nx = -dy / len; // Unused
                     const ny = dx / len;
+                    const nx = -dy / len;
 
                     if (capacity > 1) {
                         const seatIdx = skier.seatIndex ?? 0;
