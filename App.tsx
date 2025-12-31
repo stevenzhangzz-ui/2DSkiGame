@@ -41,7 +41,6 @@ const App: React.FC = () => {
   const [selectedSkierId, setSelectedSkierId] = useState<string | null>(null);
   const [savedMaps, setSavedMaps] = useState<SavedMap[]>([]);
   const [showLoadScreen, setShowLoadScreen] = useState(true);
-  const [isLoadingMaps, setIsLoadingMaps] = useState(true);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [newMapName, setNewMapName] = useState("");
   const [isDrawing, setIsDrawing] = useState(false);
@@ -166,15 +165,7 @@ const App: React.FC = () => {
   // Initialize
   useEffect(() => {
     const load = async () => {
-      setIsLoadingMaps(true);
-      try { 
-        const maps = await loadMapsFromStorage(); 
-        setSavedMaps(maps); 
-      } catch (e) { 
-        console.error("Failed to load maps from storage", e); 
-      } finally {
-        setIsLoadingMaps(false);
-      }
+      try { const maps = await loadMapsFromStorage(); setSavedMaps(maps); } catch (e) { console.error("Failed to load maps from storage", e); }
     };
     load();
   }, []);
@@ -348,21 +339,15 @@ const App: React.FC = () => {
            <p className="text-slate-400 mb-12">Build your dream resort, manage slopes, and create experts!</p>
            <div className="flex gap-8 w-full max-w-5xl h-[60vh]">
               <div className="flex-1 bg-slate-700/50 rounded-xl p-6 overflow-hidden flex flex-col">
-                 <h2 className="text-xl font-bold mb-4 flex justify-between"><span>Select a Resort</span><span className="text-sm font-normal text-slate-400">{isLoadingMaps ? 'Syncing...' : `${savedMaps.length} saved`}</span></h2>
+                 <h2 className="text-xl font-bold mb-4 flex justify-between"><span>Select a Resort</span><span className="text-sm font-normal text-slate-400">{savedMaps.length} saved</span></h2>
                  <div className="flex-1 overflow-y-auto space-y-4 pr-2">
-                    {isLoadingMaps ? (
-                      <div className="text-center text-slate-400 mt-20 animate-pulse">Syncing with Cloud...</div>
-                    ) : savedMaps.length === 0 ? (
-                      <div className="text-center text-slate-500 mt-20">No saved maps found. Create a new one!</div> 
-                    ) : (
-                      savedMaps.map(map => (
+                    {savedMaps.length === 0 ? <div className="text-center text-slate-500 mt-20">No saved maps found. Create a new one!</div> : savedMaps.map(map => (
                         <div key={map.id} onClick={() => handleLoadMap(map)} className="bg-slate-600 rounded-lg p-3 hover:bg-slate-500 cursor-pointer transition-all flex gap-4 group">
                            <div className="w-32 h-20 bg-black rounded overflow-hidden shrink-0 border border-slate-500">{map.backgroundImage ? <img src={map.backgroundImage} className="w-full h-full object-cover" alt="map thumbnail" /> : <div className="w-full h-full flex items-center justify-center text-xs text-slate-500">No Image</div>}</div>
                            <div className="flex-1 flex flex-col justify-center"><div className="font-bold text-lg">{map.name}</div><div className="text-xs text-slate-300">{new Date(map.date).toLocaleDateString()}</div></div>
                            <button onClick={(e) => handleDeleteMap(map.id, e)} className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-200 px-3 py-1 text-sm">Delete</button>
                         </div>
-                      ))
-                    )}
+                      ))}
                  </div>
               </div>
               <div className="w-1/3 flex flex-col gap-4">
