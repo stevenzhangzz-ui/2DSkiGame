@@ -4,6 +4,13 @@ export const distance = (p1: Point, p2: Point): number => {
   return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
 };
 
+export const getPointOnLine = (p1: Point, p2: Point, t: number): Point => {
+  return {
+    x: p1.x + (p2.x - p1.x) * t,
+    y: p1.y + (p2.y - p1.y) * t
+  };
+};
+
 export const getProjectedPointOnSegment = (p: Point, a: Point, b: Point): { t: number, dist: number } => {
   const l2 = Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2);
   if (l2 === 0) return { t: 0, dist: distance(p, a) };
@@ -101,11 +108,8 @@ const getTrailParams = (p1: Point, p2: Point, id: string) => {
 
 export const getPointOnTrail = (p1: Point, p2: Point, t: number, id: string, subType?: string) => {
     // Magic Carpet is straight
-    if (subType === TrailDifficulty.MAGIC_CARPET) {
-        return {
-            x: p1.x + (p2.x - p1.x) * t,
-            y: p1.y + (p2.y - p1.y) * t
-        };
+    if (subType === 'Magic Carpet') {
+        return getPointOnLine(p1, p2, t);
     }
 
     const { freq, amp } = getTrailParams(p1, p2, id);

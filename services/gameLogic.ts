@@ -1,157 +1,111 @@
 
 import { 
   GameState, Skier, Facility, Point, 
-  SkierLevel, FacilityType, TrailDifficulty, LiftType 
+  SkierLevel, FacilityType, TrailDifficulty, LiftType, FloatingText
 } from '../types';
 import { 
-  distance, getProjectedPointOnSegment, getNearestPointOnTrail, isPointInPolygon, getPointOnTrail
+  distance, getProjectedPointOnSegment, getNearestPointOnTrail, isPointInPolygon
 } from './geometry';
 import { 
-  SPEED_MULTIPLIERS, BASE_SKI_SPEED, LIFT_SPEED, GONDOLA_SPEED, getLiftCapacity, getLiftNumChairs, PROMOTION_TIME_REQUIRED
+  SPEED_MULTIPLIERS, BASE_SKI_SPEED, LIFT_SPEED, GONDOLA_SPEED, 
+  getLiftCapacity, getLiftNumChairs, PROMOTION_COUNTS, INCOME, 
+  MAX_POPULATION, MAX_SPAWNED_EXPERTS, CYCLE_TOTAL, DURATION_DAY, DURATION_FADE, DURATION_NIGHT,
+  SNOW_MIN, SNOW_IDEAL, TRAIL_NAMES, LIFT_NAMES, DEFAULT_GRID_H
 } from '../constants';
 
 const NAMES = ["Peak", "Slope", "Run", "Glider", "Express", "Way", "Path", "Drop", "Rise", "View"];
 
 export const getRandomName = (type: string) => {
+  if (type === 'Trail') {
+     return TRAIL_NAMES[Math.floor(Math.random() * TRAIL_NAMES.length)];
+  }
+  if (type === 'Lift' || type === 'Gondola' || type === '2-Seat' || type === '4-Seat') {
+     return LIFT_NAMES[Math.floor(Math.random() * LIFT_NAMES.length)];
+  }
   return `${NAMES[Math.floor(Math.random() * NAMES.length)]} ${type} ${Math.floor(Math.random() * 100)}`;
 };
 
 const getLabel = (index: number): string => {
   let label = "";
   let i = index;
-  while (i >= 0) {
-    label = String.fromCharCode(65 + (i % 26)) + label;
+  if (i < 0) return "A";
+  do {
+    const rem = i % 26;
+    label = String.fromCharCode(65 + rem) + label;
     i = Math.floor(i / 26) - 1;
-  }
+  } while (i >= 0);
   return label;
 };
 
-// --- Helper for Map Generation ---
+// --- Helper: Find Hotel Position (Middle Bottom of Scope) ---
+export const calculateHotelPosition = (mountains: Point[][], gridH: number): Point => {
+    if (!mountains.length) return { x: 80, y: gridH - 10 };
+    
+    // Flatten points to find bounding box of the first main mountain
+    const mainMtn = mountains[0];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    mainMtn.forEach(p => {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+    });
+
+    // Place in the middle horizontally, at the bottom of the mountain
+    const centerX = (minX + maxX) / 2;
+    
+    return {
+        x: centerX,
+        y: Math.min(gridH - 5, maxY)
+    };
+};
+
 export const findBestStartPoint = (mountain: Point[]): { start: Point, mid: Point } => {
   if (!mountain || mountain.length === 0) return { start: {x: 80, y: 80}, mid: {x: 80, y: 40} };
 
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  mountain.forEach(p => {
-    if (p.x < minX) minX = p.x;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.y > maxY) maxY = p.y;
-  });
-
-  // Calculate "Middle of Bottom"
-  const centerX = (minX + maxX) / 2;
-  const bottomY = maxY;
+  // Find lowest center point for start
+  const sortedByY = [...mountain].sort((a, b) => b.y - a.y);
+  const lowest = sortedByY[0];
   
-  // Find a valid start point by scanning upwards from bottom-center
-  // This ensures we are inside the polygon
-  let startY = bottomY - 1; 
-  let found = false;
-  // Scan up to 30% of height to find a valid base spot
-  const limitY = bottomY - (maxY - minY) * 0.3;
-  
-  while (startY > limitY) {
-      if (isPointInPolygon({x: centerX, y: startY}, mountain)) {
-          found = true;
-          break;
-      }
-      startY -= 1;
-  }
+  // Find highest point for mid
+  const highest = [...mountain].sort((a, b) => a.y - b.y)[0];
 
-  // If scanning up the center didn't work (e.g. concave bottom), fallback to the lowest vertex
-  let start: Point;
-  if (found) {
-      start = { x: centerX, y: startY - 2 }; // Give a little padding from edge
-  } else {
-      const lowest = mountain.reduce((prev, curr) => (prev.y > curr.y) ? prev : curr);
-      start = { x: lowest.x, y: lowest.y - 2 };
-  }
-
-  // Define Mid Point (Mid Station / Peak) target
-  // We try to find a point higher up.
-  // Find the highest point (min Y)
-  const highest = mountain.reduce((prev, curr) => (prev.y < curr.y) ? prev : curr);
+  const start = { x: lowest.x, y: lowest.y - 2 };
   
-  // Interpolate between start and highest to find a good mid-mountain spot
-  // We prefer it to be roughly aligned with start X if possible for a straight lift look, 
-  // but following the slope to the peak is safer for ensuring it's inside.
+  // Mid point at 60% up the mountain
   const mid = {
-      x: start.x + (highest.x - start.x) * 0.65, // 65% up the way to peak
-      y: start.y + (highest.y - start.y) * 0.65
+      x: start.x + (highest.x - start.x) * 0.6,
+      y: start.y + (highest.y - start.y) * 0.6
   };
-  
-  // Validation: If computed mid is not inside, fallback to geometric centroid or safe interpolation
-  if (!isPointInPolygon(mid, mountain)) {
-      // Try simple vertical ray at startX
-      let testY = start.y - 10;
-      let validMid = false;
-      while(testY > minY) {
-         if(!isPointInPolygon({x: start.x, y: testY}, mountain)) {
-             // We hit a boundary going up? Backtrack a bit and use that
-             validMid = true;
-             mid.x = start.x;
-             mid.y = testY + 5; 
-             break;
-         }
-         testY -= 2;
-      }
-      if (!validMid) {
-          // Fallback to geometric centroid of triangle (start, highest, and a third point?)
-          // Just use halfway to highest
-          mid.x = (start.x + highest.x) / 2;
-          mid.y = (start.y + highest.y) / 2;
-      }
-  }
 
   return { start, mid };
 };
 
 // --- Tree Management ---
-
 export const generateForest = (mountains: Point[][], w: number, h: number): Point[] => {
   const trees: Point[] = [];
-  const density = 0.45; // Density factor per pass
-  const passes = 5; // 5x more dense
-  const edgeMargin = 1.0; // Margin to stay away from edge
+  const density = 0.45;
+  const passes = 5;
+  const edgeMargin = 1.0;
   
-  // Stratified Sampling: Iterate over grid cells and place trees randomly within them
   for (let x = 0; x < w; x++) {
       for (let y = 0; y < h; y++) {
-          // Try multiple times per cell to increase density
           for (let i = 0; i < passes; i++) {
-            // 1. Random chance to plant
             if (Math.random() > density) continue;
-
-            // 2. Full random position within this 1x1 cell
             const px = x + Math.random();
             const py = y + Math.random();
             const p = { x: px, y: py };
-
-            // 3. Must be inside a mountain AND not on the very edge
             let inside = false;
             for (const poly of mountains) {
                 if (isPointInPolygon(p, poly)) {
-                    // Check neighbors to ensure we aren't on the bleeding edge
-                    const up = { x: px, y: py - edgeMargin };
-                    const down = { x: px, y: py + edgeMargin };
-                    const left = { x: px - edgeMargin, y: py };
-                    const right = { x: px + edgeMargin, y: py };
-                    
-                    if (isPointInPolygon(up, poly) && 
-                        isPointInPolygon(down, poly) && 
-                        isPointInPolygon(left, poly) && 
-                        isPointInPolygon(right, poly)) {
-                        inside = true;
-                        break;
-                    }
+                    inside = true;
+                    break;
                 }
             }
             if (!inside) continue;
-
-            // 4. Altitude check (No trees at very top)
-            // Assuming y=0 is top. 
-            // Simple Global Y check: Top 20% of screen is snow only.
             if (py < h * 0.20) continue;
-
             trees.push(p);
           }
       }
@@ -160,24 +114,17 @@ export const generateForest = (mountains: Point[][], w: number, h: number): Poin
 };
 
 export const clearTreesForFacility = (trees: Point[], facility: Facility): Point[] => {
-  // Clearing radius (grid units)
-  // Increased to 0.8 to ensure visible path is cleared (approx 16px radius at 20px grid)
   const CLEAR_RADIUS = 0.8; 
-
   return trees.filter(tree => {
       if (facility.type === FacilityType.TRAIL) {
-          // For trails, we check against the curve
-          if (facility.length < 2 || facility.subType === TrailDifficulty.MAGIC_CARPET) {
-              // Linear
+          if (facility.length < 2) {
               const { dist } = getProjectedPointOnSegment(tree, facility.start, facility.end);
               return dist > CLEAR_RADIUS;
           } else {
-              // Curved
               const { dist } = getNearestPointOnTrail(tree, facility.start, facility.end, facility.id, facility.subType as string);
               return dist > CLEAR_RADIUS;
           }
       } else {
-          // Lifts / Gondolas are straight lines
           const { dist } = getProjectedPointOnSegment(tree, facility.start, facility.end);
           return dist > CLEAR_RADIUS;
       }
@@ -185,7 +132,6 @@ export const clearTreesForFacility = (trees: Point[], facility: Facility): Point
 };
 
 // --- Skier Logic ---
-
 export const createSkier = (id: string, startPoint: Point, labelIndex: number, level: SkierLevel = SkierLevel.BEGINNER): Skier => ({
   id,
   label: getLabel(labelIndex),
@@ -194,127 +140,161 @@ export const createSkier = (id: string, startPoint: Point, labelIndex: number, l
   y: startPoint.y,
   state: 'idle',
   progress: 0,
-  timeOnHardestTrail: 0,
+  rideCount: 0,
   seatIndex: 0,
-  speedVariance: 0.85 + Math.random() * 0.3 // 0.85 to 1.15 variance
+  speedVariance: 0.85 + Math.random() * 0.3,
+  hunger: 100,
+  lastRentalPayTime: Date.now()
 });
 
-const getHardestAllowed = (level: SkierLevel): TrailDifficulty => {
+const getPromotionTarget = (level: SkierLevel): TrailDifficulty | null => {
   switch (level) {
-    case SkierLevel.BEGINNER: return TrailDifficulty.GREEN;
-    case SkierLevel.AMATEUR: return TrailDifficulty.BLUE;
-    case SkierLevel.ADVANCED: return TrailDifficulty.BLACK;
-    case SkierLevel.EXPERTISE: return TrailDifficulty.DOUBLE_DIAMOND;
+    case SkierLevel.BEGINNER: return TrailDifficulty.GREEN; 
+    case SkierLevel.AMATEUR: return TrailDifficulty.GREEN; 
+    case SkierLevel.ADVANCED: return TrailDifficulty.BLUE; 
+    default: return null;
   }
 };
 
-// Returns a preference score. Higher is better. 0 means "Avoid".
-export const getTrailPreference = (skier: Skier, trailType: TrailDifficulty): number => {
+export const getTrailPreference = (skier: Skier, trailType: TrailDifficulty, createdAt: number, currentTime: number, isOpen: boolean = true): number => {
+  if (!isOpen) return 0; // Skier will not choose a closed trail
+
   const levelMap = {
     [SkierLevel.BEGINNER]: 0,
     [SkierLevel.AMATEUR]: 1,
     [SkierLevel.ADVANCED]: 2,
     [SkierLevel.EXPERTISE]: 3
   };
-  
   const trailMap = {
-    [TrailDifficulty.MAGIC_CARPET]: -1,
     [TrailDifficulty.GREEN]: 0,
     [TrailDifficulty.BLUE]: 1,
     [TrailDifficulty.BLACK]: 2,
     [TrailDifficulty.DOUBLE_DIAMOND]: 3,
     [TrailDifficulty.PARK]: 1.5
   };
-
   const sLvl = levelMap[skier.level];
   const tLvl = trailMap[trailType];
+  let score = 0;
 
-  // EXPERTISE BEHAVIOR: "Play all terrain, less green, more black/double black"
   if (skier.level === SkierLevel.EXPERTISE) {
-    if (trailType === TrailDifficulty.DOUBLE_DIAMOND) return 100;
-    if (trailType === TrailDifficulty.BLACK) return 90;
-    if (trailType === TrailDifficulty.PARK) return 80;
-    if (trailType === TrailDifficulty.BLUE) return 60;
-    if (trailType === TrailDifficulty.GREEN) return 20; // Less green
-    if (trailType === TrailDifficulty.MAGIC_CARPET) return 5;
-    return 50;
+    if (trailType === TrailDifficulty.DOUBLE_DIAMOND) score = 100;
+    else if (trailType === TrailDifficulty.BLACK) score = 90;
+    else score = 50;
+  } else {
+      if (tLvl === sLvl) score = 100;
+      else if (tLvl === sLvl - 1) score = 60;
+      else if (tLvl > sLvl) score = 1; 
+      else score = 20;
   }
 
-  const targetTrail = getHardestAllowed(skier.level);
-  const isTarget = trailType === targetTrail;
-  
-  // Comfort trail is usually one level below current level
-  const isComfort = (tLvl === sLvl - 1) || (sLvl === 0 && tLvl === -1); 
-
-  // Check if "close to promotion" (70% of required time)
-  const isCloseToPromotion = skier.timeOnHardestTrail >= (PROMOTION_TIME_REQUIRED * 0.7);
-
-  // 1. Target Trail (Needed for promotion)
-  if (isTarget) {
-    // If close to promotion, prioritize target heavily to finish up
-    if (isCloseToPromotion) return 150;
-    // Otherwise, secondary preference (~30%)
-    return 30; 
-  }
-
-  // 2. Comfort Zone
-  if (isComfort) {
-    // "Tend to stay on comfort (70%)"
-    // If close to promotion, reduce comfort preference
-    if (isCloseToPromotion) return 20;
-    return 70; 
-  }
-
-  // Special case for Advanced: "Stay on Green OR Blue"
-  // Blue is comfort (handled above), Green is super-comfort
-  if (skier.level === SkierLevel.ADVANCED && trailType === TrailDifficulty.GREEN) {
-    return isCloseToPromotion ? 10 : 60;
-  }
-
-  // 3. Park (Fun for everyone above beginner)
-  if (trailType === TrailDifficulty.PARK && sLvl > 0) return 40;
-
-  // 4. Too Hard
-  if (tLvl > sLvl) return 1; // Avoid unless forced
-
-  // 5. Way Too Easy
-  if (sLvl > tLvl + 2) return 5; 
-
-  // Default fallback
-  return 10;
+  // Bonus for new trails
+  if (currentTime - createdAt < 120 && tLvl <= sLvl) score += 200;
+  return score;
 };
 
-const isHardestTrail = (skier: Skier, trailType: TrailDifficulty): boolean => {
-  return trailType === getHardestAllowed(skier.level);
-};
+const evaluateLift = (lift: Facility, facilities: Facility[], skier: Skier, currentTime: number): number => {
+  // If Lift is closed, AI rejects it
+  if (lift.isOpen === false) return 0;
 
-// Check if a lift leads to suitable terrain
-const evaluateLift = (lift: Facility, facilities: Facility[], skier: Skier): number => {
-  // Find trails starting near lift end
+  // Find connected trails at the end of the lift
   const nextTrails = facilities.filter(f => 
     f.type === FacilityType.TRAIL && 
     distance(f.start, lift.end) < 2 
   );
 
-  if (nextTrails.length === 0) return 0; // Dead end
+  // DEAD LOOP CHECK: If there are no trails, or ALL connected trails are closed, do not take this lift.
+  const openTrails = nextTrails.filter(t => t.isOpen !== false);
+  if (openTrails.length === 0) return 0;
 
-  // Calculate best option score available at the top
   let maxScore = 0;
-  nextTrails.forEach(t => {
-    let score = getTrailPreference(skier, t.subType as TrailDifficulty);
-    
-    // HEURISTIC: Encourage crossing mountains (finding higher difficulty trails)
-    // If a lift leads to a Black/Double Diamond trail, give it a massive bonus for Advanced/Expertise
-    // even if it's far away.
-    if ((skier.level === SkierLevel.ADVANCED || skier.level === SkierLevel.EXPERTISE) && 
-        (t.subType === TrailDifficulty.BLACK || t.subType === TrailDifficulty.DOUBLE_DIAMOND)) {
-        score += 50; 
-    }
-    
-    if (score > maxScore) maxScore = score;
+  openTrails.forEach(t => {
+      let score = getTrailPreference(skier, t.subType as TrailDifficulty, t.createdAt, currentTime, t.isOpen);
+      if (score > maxScore) maxScore = score;
+  });
+  return maxScore;
+};
+
+// --- Payment Helper ---
+const processPayment = (state: GameState, amount: number, x: number, y: number): { coins: number, floatingTexts: FloatingText[] } => {
+    const ft: FloatingText = {
+        id: `ft-${Date.now()}-${Math.random()}`,
+        x, y,
+        text: `+$${amount}`,
+        life: 1.0,
+        color: '#fbbf24' // Gold
+    };
+    return {
+        coins: state.coins + amount,
+        floatingTexts: [...state.floatingTexts, ft]
+    };
+};
+
+const applyConnectivityRules = (facilities: Facility[], gridH: number): Facility[] => {
+  const openSet = new Set<string>();
+  const queue: string[] = [];
+
+  // 1. Sources: Open Lifts/Gondolas starting in lower 50% of screen (Base Area)
+  const BASE_Y_THRESHOLD = gridH * 0.5;
+  
+  facilities.forEach(f => {
+      // Cafes are always open if intrinsically open (independent of lifts)
+      if (f.type === FacilityType.CAFE) {
+          if (f.isOpen !== false) openSet.add(f.id);
+          return;
+      }
+
+      if ((f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA) && f.isOpen !== false) {
+          if (f.start.y > BASE_Y_THRESHOLD) {
+              openSet.add(f.id);
+              queue.push(f.id);
+          }
+      }
   });
 
-  return maxScore;
+  // 2. Build Graph (Source feeds Target)
+  const adj = new Map<string, string[]>();
+  facilities.forEach(source => {
+      if (source.isOpen === false) return; // Closed things don't feed
+      facilities.forEach(target => {
+          if (source.id === target.id) return;
+          // Connection: Source END feeds Target START
+          // Tolerance 3.0 units
+          if (distance(source.end, target.start) < 3.0) {
+              if (!adj.has(source.id)) adj.set(source.id, []);
+              adj.get(source.id)!.push(target.id);
+          }
+      });
+  });
+
+  // 3. Propagate Open Status via BFS
+  while(queue.length > 0) {
+      const curr = queue.shift()!;
+      const neighbors = adj.get(curr);
+      if (neighbors) {
+          neighbors.forEach(nextId => {
+              if (!openSet.has(nextId)) {
+                  const f = facilities.find(x => x.id === nextId);
+                  // Only propagate if intrinsically open
+                  if (f && f.isOpen !== false) {
+                      openSet.add(nextId);
+                      queue.push(nextId);
+                  }
+              }
+          });
+      }
+  }
+
+  // 4. Update Open Status
+  return facilities.map(f => {
+      if (f.type === FacilityType.CAFE) return f; 
+      if (f.isOpen === false) return f; // Already closed
+      
+      // If not reachable from base, force close
+      if (!openSet.has(f.id)) {
+          return { ...f, isOpen: false };
+      }
+      return f;
+  });
 };
 
 export const updateGame = (state: GameState, deltaTime: number): GameState => {
@@ -326,32 +306,201 @@ export const updateGame = (state: GameState, deltaTime: number): GameState => {
   let promotedCount = state.promotedCount;
   let nextLabelIdx = state.nextSkierLabelIndex ?? 5; 
   let lastSpawnTime = state.lastSpawnTime;
+  let newFloatingTexts = [...state.floatingTexts];
+  let snowDepth = state.snowDepth ?? 60; 
 
-  const coinRate = state.skiers.length / 60; 
-  newCoins += coinRate * dt;
+  // Update Floating Texts (Physics)
+  newFloatingTexts = newFloatingTexts.map(ft => ({
+      ...ft,
+      y: ft.y - (dt * 0.5), // Float up
+      life: ft.life - (dt * 0.5) // Decay
+  })).filter(ft => ft.life > 0);
 
-  const newFacilities = state.facilities.map(f => ({ ...f, queue: [...f.queue] })); // Deep copy queue
+  // Day / Night Cycle
+  const cycleTime = newTime % CYCLE_TOTAL;
+  let lightOpacity = 0;
+  let isNight = false;
+
+  if (cycleTime < DURATION_DAY) {
+      lightOpacity = 0; isNight = false;
+  } else if (cycleTime < DURATION_DAY + DURATION_FADE) {
+      isNight = false;
+      lightOpacity = ((cycleTime - DURATION_DAY) / DURATION_FADE);
+  } else if (cycleTime < DURATION_DAY + DURATION_FADE + DURATION_NIGHT) {
+      isNight = true; lightOpacity = 1; 
+  } else {
+      isNight = true; 
+      lightOpacity = 1 - ((cycleTime - (DURATION_DAY + DURATION_FADE + DURATION_NIGHT)) / DURATION_FADE);
+  }
+
+  // Detect Phase Shifts
+  const justBecameNight = isNight && !state.isNight;
+  const justBecameDay = !isNight && state.isNight;
+
+  // Snow Weather Simulation
+  if (Math.random() < 0.05) {
+      const change = (Math.random() - 0.4) * 0.5;
+      snowDepth = Math.max(0, Math.min(300, snowDepth + change));
+  }
+  
+  const getSnowSpeedMod = (depth: number) => {
+      if (depth < SNOW_MIN) return 0.4;
+      if (depth < 50) return 0.8;
+      if (depth > 200) return 0.9;
+      return 1.0;
+  };
+  const snowSpeedMod = getSnowSpeedMod(snowDepth);
+
+  // Update Facility Status (Daily & Nightly Logic)
+  let newFacilities = state.facilities;
+
+  // Determine daily statuses on sunrise or if facilities changed
+  if (justBecameDay) {
+      newFacilities = state.facilities.map(f => {
+          let isOpen = true;
+          // Random Wind Hold for Lifts on a new day (10% chance)
+          if (f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA) {
+              if (Math.random() < 0.1) isOpen = false; 
+          }
+          return { ...f, isOpen, queue: [...f.queue] };
+      });
+  } else if (justBecameNight) {
+      const nextFacilities = state.facilities.map(f => ({ ...f, queue: [...f.queue] }));
+      const openTrailIds = new Set<string>();
+
+      // 1. Determine Trail Status (Green=Open, Blue=70%, Others=Closed)
+      nextFacilities.forEach(f => {
+          if (f.type === FacilityType.TRAIL) {
+              let isOpen = false;
+              if (f.subType === TrailDifficulty.GREEN) {
+                  isOpen = true;
+              } else if (f.subType === TrailDifficulty.BLUE) {
+                  isOpen = Math.random() < 0.7;
+              } else {
+                  isOpen = false;
+              }
+              f.isOpen = isOpen;
+              if (isOpen) openTrailIds.add(f.id);
+          } else if (f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA) {
+              f.isOpen = false; // Close all first, open needed ones below
+          }
+      });
+
+      // 2. Identify Lifts needed for Open Trails (Reverse Connectivity)
+      const feeders = new Map<string, Facility[]>();
+      nextFacilities.forEach(source => {
+          if (source.type === FacilityType.LIFT || source.type === FacilityType.GONDOLA) {
+              nextFacilities.forEach(target => {
+                  if (source.id !== target.id && distance(source.end, target.start) < 3.0) {
+                      if (!feeders.has(target.id)) feeders.set(target.id, []);
+                      feeders.get(target.id)!.push(source);
+                  }
+              });
+          }
+      });
+
+      const neededQueue = Array.from(openTrailIds);
+      const neededLifts = new Set<string>();
+
+      while (neededQueue.length > 0) {
+          const targetId = neededQueue.shift()!;
+          const sources = feeders.get(targetId);
+          if (sources) {
+              sources.forEach(source => {
+                  if (!neededLifts.has(source.id)) {
+                      neededLifts.add(source.id);
+                      neededQueue.push(source.id);
+                  }
+              });
+          }
+      }
+
+      // 3. Open needed lifts
+      nextFacilities.forEach(f => {
+          if (neededLifts.has(f.id)) f.isOpen = true;
+      });
+      
+      // Fallback: Ensure at least one lift is open if trails are open but no connections found
+      if (openTrailIds.size > 0 && neededLifts.size === 0) {
+          let bestLift: Facility | null = null;
+          let minD = Infinity;
+          const lifts = nextFacilities.filter(f => f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA);
+          lifts.forEach(l => {
+              nextFacilities.filter(t => openTrailIds.has(t.id)).forEach(t => {
+                  const d = distance(l.end, t.start);
+                  if (d < minD) { minD = d; bestLift = l; }
+              });
+          });
+          if (bestLift && minD < 20) (bestLift as Facility).isOpen = true;
+      }
+
+      newFacilities = nextFacilities;
+  } else {
+      // Just copy queue refs to mutate safely below
+      newFacilities = state.facilities.map(f => ({ ...f, queue: [...f.queue] }));
+  }
+
+  // Check Connectivity (Reachability from Base)
+  newFacilities = applyConnectivityRules(newFacilities, DEFAULT_GRID_H);
+
   const skiersToAdd: Skier[] = [];
 
-  // Spawn new skier every 60 seconds
-  if (newTime - lastSpawnTime >= 60) {
-      const startFacility = newFacilities.find(f => f.name === "Holiday Lift") || newFacilities[0];
+  // Identify skiers to rest at night start (50% chance)
+  const skiersToRest = new Set<string>();
+  if (justBecameNight) {
+      state.skiers.forEach(s => {
+          if (Math.random() < 0.5) {
+              skiersToRest.add(s.id);
+          }
+      });
+      
+      // Clear them from queues immediately
+      newFacilities.forEach(f => {
+          f.queue = f.queue.filter(id => !skiersToRest.has(id));
+      });
+  }
+
+  // Identify lifts for wake up spawn
+  let spawnPoints: Point[] = [];
+  if (justBecameDay) {
+      spawnPoints = newFacilities
+          .filter(f => (f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA) && f.isOpen !== false)
+          .map(f => f.start);
+      // Fallback if all lifts closed, spawn near middle base
+      if (spawnPoints.length === 0) spawnPoints.push({x: 80, y: 80});
+  }
+
+  // Spawning (Only Day)
+  if (!isNight && state.skiers.length < MAX_POPULATION && newTime - lastSpawnTime >= 60) {
+      // Find an OPEN lift to spawn at
+      const startFacility = newFacilities.find(f => (f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA) && f.isOpen !== false) || newFacilities[0];
+      
       if (startFacility) {
-          skiersToAdd.push(createSkier(`s-${Date.now()}-spawn`, startFacility.start, nextLabelIdx));
+          const roll = Math.random();
+          let spawnLevel = SkierLevel.BEGINNER;
+          const currentExperts = state.skiers.filter(s => s.level === SkierLevel.EXPERTISE).length;
+          const canSpawnExpert = currentExperts < MAX_SPAWNED_EXPERTS;
+
+          if (roll < 0.30) spawnLevel = SkierLevel.BEGINNER;
+          else if (roll < 0.70) spawnLevel = SkierLevel.AMATEUR;
+          else if (roll < 0.95) spawnLevel = SkierLevel.ADVANCED;
+          else spawnLevel = canSpawnExpert ? SkierLevel.EXPERTISE : SkierLevel.ADVANCED;
+
+          skiersToAdd.push(createSkier(`s-${Date.now()}-spawn`, startFacility.start, nextLabelIdx, spawnLevel));
           lastSpawnTime += 60;
       }
   }
 
-  // LIFT BOARDING LOGIC
+  // Lift Boarding
   const boardingUpdates = new Map<string, {newState: 'lifting', progress: number, seat: number}>();
-  
   newFacilities.forEach(f => {
-    if (f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA) {
+    // Skiers cannot board closed lifts
+    if ((f.type === FacilityType.LIFT || f.type === FacilityType.GONDOLA) && f.isOpen !== false) {
        const isGondola = f.type === FacilityType.GONDOLA;
-       const speed = (isGondola ? GONDOLA_SPEED : LIFT_SPEED) / Math.max(f.length, 1);
-       const numChairs = getLiftNumChairs(f.length);
+       const baseSpeed = isGondola ? GONDOLA_SPEED : LIFT_SPEED;
+       const speed = baseSpeed / Math.max(f.length, 1);
+       const numChairs = getLiftNumChairs(f.length, f.subType as string);
        const capacity = getLiftCapacity(f.subType as string);
-
        const cyclePos = newTime * speed * numChairs;
        const phase = cyclePos % 1; 
 
@@ -359,22 +508,13 @@ export const updateGame = (state: GameState, deltaTime: number): GameState => {
        const skiersAtStart = skiersOnLift.filter(s => s.progress < (1/numChairs) * 0.5);
        
        const occupiedSeats = new Set<number>();
-       skiersAtStart.forEach(s => {
-          if (s.seatIndex !== undefined) occupiedSeats.add(s.seatIndex);
-       });
+       skiersAtStart.forEach(s => { if (s.seatIndex !== undefined) occupiedSeats.add(s.seatIndex); });
        
        if (phase < 0.2) { 
-           // Can board
            const freeSeats = capacity - occupiedSeats.size;
            if (freeSeats > 0 && f.queue.length > 0) {
-               
-               // Board up to freeSeats from the queue
                for (let i = 0; i < Math.min(f.queue.length, freeSeats); i++) {
-                   // We don't remove from queue here, we do it when processing the skier to avoid index mismatch during iteration?
-                   // No, we can grab IDs here.
-                   const skierId = f.queue[0]; // Peek
-                   
-                   // Determine seat
+                   const skierId = f.queue[0];
                    let seat = 0;
                    if (capacity > 1) {
                       const available = [];
@@ -383,19 +523,9 @@ export const updateGame = (state: GameState, deltaTime: number): GameState => {
                           seat = available[Math.floor(Math.random() * available.length)];
                           occupiedSeats.add(seat);
                       }
-                   } else {
-                       seat = 0;
                    }
-
-                   boardingUpdates.set(skierId, {
-                       newState: 'lifting',
-                       progress: phase / numChairs, 
-                       seat: seat
-                   });
-                   
-                   // Remove from queue
+                   boardingUpdates.set(skierId, { newState: 'lifting', progress: phase / numChairs, seat: seat });
                    f.queue.shift();
-                   // Adjust loop index since we shifted
                    i--; 
                }
            }
@@ -406,7 +536,51 @@ export const updateGame = (state: GameState, deltaTime: number): GameState => {
   const processedSkiers = state.skiers.map(skier => {
     let s = { ...skier };
     
-    // Apply boarding updates
+    // NIGHT TRANSITION (Go to Hotel)
+    if (justBecameNight && skiersToRest.has(s.id)) {
+        s.state = 'resting';
+        s.currentFacilityId = undefined;
+        s.x = state.hotelPosition.x + (Math.random() * 4 - 2);
+        s.y = state.hotelPosition.y + (Math.random() * 2 - 1);
+        
+        // Pay Hotel Fee
+        const pay = processPayment({ ...state, coins: newCoins, floatingTexts: newFloatingTexts }, INCOME.HOTEL, s.x, s.y);
+        newCoins = pay.coins;
+        newFloatingTexts = pay.floatingTexts;
+    } 
+    // DAY TRANSITION (Wake up from resting)
+    else if (justBecameDay && s.state === 'resting') {
+        s.state = 'idle';
+        const start = spawnPoints[Math.floor(Math.random() * spawnPoints.length)];
+        s.x = start.x + (Math.random() - 0.5);
+        s.y = start.y + (Math.random() - 0.5);
+    }
+
+    if (s.state === 'resting') {
+        // Micro-movement in hotel
+        if (Math.random() < 0.05) {
+             s.x += (Math.random() - 0.5) * 0.5;
+             s.y += (Math.random() - 0.5) * 0.2;
+             if(Math.abs(s.x - state.hotelPosition.x) > 4) s.x = state.hotelPosition.x;
+             if(Math.abs(s.y - state.hotelPosition.y) > 2) s.y = state.hotelPosition.y;
+        }
+        return s; 
+    }
+
+    // RENTAL CHARGE (Every 60 game seconds)
+    if (!s.lastRentalPayTime) s.lastRentalPayTime = newTime;
+    if (newTime - s.lastRentalPayTime > 60) {
+       s.lastRentalPayTime = newTime;
+       const pay = processPayment({ ...state, coins: newCoins, floatingTexts: newFloatingTexts }, INCOME.RENTAL, s.x, s.y);
+       newCoins = pay.coins;
+       newFloatingTexts = pay.floatingTexts;
+    }
+
+    // HUNGER DECAY (Rate: ~80 points per 100s cycle -> 0.8/sec)
+    if (s.state !== 'eating') {
+      s.hunger = Math.max(0, s.hunger - (dt * 0.8));
+    }
+
     if (boardingUpdates.has(s.id)) {
         const update = boardingUpdates.get(s.id)!;
         s.state = update.newState;
@@ -414,86 +588,101 @@ export const updateGame = (state: GameState, deltaTime: number): GameState => {
         s.seatIndex = update.seat;
     }
 
+    // EATING
+    if (s.state === 'eating') {
+       s.progress += dt * 0.5; 
+       if (s.progress >= 1) {
+          s.hunger = 100;
+          s.state = 'idle';
+          s.currentFacilityId = undefined;
+          
+          const pay = processPayment({ ...state, coins: newCoins, floatingTexts: newFloatingTexts }, INCOME.CAFE, s.x, s.y);
+          newCoins = pay.coins;
+          newFloatingTexts = pay.floatingTexts;
+          
+          const cafe = newFacilities.find(f => f.id === s.currentFacilityId);
+          if (cafe) {
+             s.x = cafe.start.x + (Math.random()-0.5);
+             s.y = cafe.start.y + (Math.random()-0.5);
+          }
+       }
+       return s;
+    }
+
+    // IDLE LOGIC
     if (s.state === 'idle') {
       let options: { facility: Facility, t: number, score: number }[] = [];
 
-      // 1. Starts exactly near here
-      const starts = newFacilities.filter(f => 
-        Math.abs(f.start.x - s.x) < 0.5 && Math.abs(f.start.y - s.y) < 0.5
-      );
-      
-      // 2. Merges into middle (Only Trails)
-      const trails = newFacilities.filter(f => f.type === FacilityType.TRAIL && !starts.includes(f));
-      
-      const merges = trails.map(f => {
-         if (f.length < 2 || f.subType === TrailDifficulty.MAGIC_CARPET) {
-             const { t, dist } = getProjectedPointOnSegment({x: s.x, y: s.y}, f.start, f.end);
-             if (dist < 0.8 && t > 0.05 && t < 0.95) return { facility: f, t };
-         } else {
-             const { t, dist } = getNearestPointOnTrail({x: s.x, y: s.y}, f.start, f.end, f.id, f.subType as string);
-             if (dist < 0.8 && t > 0.05 && t < 0.95) return { facility: f, t };
-         }
-         return null;
-      }).filter(Boolean) as { facility: Facility, t: number }[];
+      // Hungry?
+      if (s.hunger < 30) {
+          const cafes = newFacilities.filter(f => f.type === FacilityType.CAFE);
+          cafes.forEach(cafe => {
+             const d = distance(cafe.start, s);
+             if (d < 15) options.push({ facility: cafe, t: 0, score: 2000 - d * 10 });
+          });
+      }
 
-      // Evaluate Options
-      [...starts.map(f => ({ facility: f, t: 0 })), ...merges].forEach(opt => {
-        let score = 0;
-        if (opt.facility.type === FacilityType.TRAIL) {
-           score = getTrailPreference(s, opt.facility.subType as TrailDifficulty);
-        } else {
-           score = evaluateLift(opt.facility, newFacilities, s);
-        }
-        if (opt.t > 0) score += 20;
-        if (s.y > 30 && opt.facility.type === FacilityType.LIFT) score += 5;
+      if (options.length === 0) {
+        // Find nearby facilities
+        const starts = newFacilities.filter(f => Math.abs(f.start.x - s.x) < 1.0 && Math.abs(f.start.y - s.y) < 1.0);
+        
+        // Or connect to mid-trail?
+        const trails = newFacilities.filter(f => f.type === FacilityType.TRAIL && !starts.includes(f));
+        const merges = trails.map(f => {
+           const minX = Math.min(f.start.x, f.end.x) - 1;
+           const maxX = Math.max(f.start.x, f.end.x) + 1;
+           const minY = Math.min(f.start.y, f.end.y) - 1;
+           const maxY = Math.max(f.start.y, f.end.y) + 1;
+           if (s.x < minX || s.x > maxX || s.y < minY || s.y > maxY) return null;
 
-        options.push({ ...opt, score });
-      });
+           if (f.length < 2) {
+               const { t, dist } = getProjectedPointOnSegment({x: s.x, y: s.y}, f.start, f.end);
+               if (dist < 0.8 && t > 0.05 && t < 0.95) return { facility: f, t };
+           } else {
+               const { t, dist } = getNearestPointOnTrail({x: s.x, y: s.y}, f.start, f.end, f.id, f.subType as string);
+               if (dist < 0.8 && t > 0.05 && t < 0.95) return { facility: f, t };
+           }
+           return null;
+        }).filter(Boolean) as { facility: Facility, t: number }[];
+
+        [...starts.map(f => ({ facility: f, t: 0 })), ...merges].forEach(opt => {
+          let score = 0;
+          if (opt.facility.type === FacilityType.TRAIL) {
+             score = getTrailPreference(s, opt.facility.subType as TrailDifficulty, opt.facility.createdAt, newTime, opt.facility.isOpen);
+          } else if (opt.facility.type === FacilityType.LIFT || opt.facility.type === FacilityType.GONDOLA) {
+             score = evaluateLift(opt.facility, newFacilities, s, newTime);
+          }
+          if (opt.t > 0) score += 20;
+          options.push({ ...opt, score });
+        });
+      }
 
       if (options.length > 0) {
-        // Weighted Random Choice
         const viableOptions = options.filter(o => o.score > 0);
         const pool = viableOptions.length > 0 ? viableOptions : options;
-
-        const lottery: typeof options = [];
-        pool.forEach(opt => {
-          const tickets = Math.max(1, Math.floor(opt.score));
-          for(let i=0; i<tickets; i++) lottery.push(opt);
+        
+        // Simple weighted choice
+        let bestOption = pool[0];
+        let maxS = -1;
+        // Add randomness
+        pool.forEach(o => {
+            const rScore = o.score * Math.random();
+            if(rScore > maxS) { maxS = rScore; bestOption = o; }
         });
 
-        const chosen = lottery[Math.floor(Math.random() * lottery.length)];
-        
-        if (chosen.facility.type === FacilityType.LIFT || chosen.facility.type === FacilityType.GONDOLA) {
-          s.state = 'waiting';
-          s.currentFacilityId = chosen.facility.id;
-          s.progress = chosen.t;
-          
-          // Add to queue
-          const targetFac = newFacilities.find(f => f.id === chosen.facility.id);
-          if (targetFac && !targetFac.queue.includes(s.id)) {
-             targetFac.queue.push(s.id);
-          }
-
+        if (bestOption.facility.type === FacilityType.CAFE) {
+           s.state = 'eating'; s.currentFacilityId = bestOption.facility.id; s.progress = 0;
+        } else if (bestOption.facility.type === FacilityType.LIFT || bestOption.facility.type === FacilityType.GONDOLA) {
+          s.state = 'waiting'; s.currentFacilityId = bestOption.facility.id; s.progress = bestOption.t;
+          const fac = newFacilities.find(f => f.id === bestOption.facility.id);
+          if (fac && !fac.queue.includes(s.id)) fac.queue.push(s.id);
         } else {
-          s.state = 'skiing';
-          s.currentFacilityId = chosen.facility.id;
-          s.progress = chosen.t;
+          s.state = 'skiing'; s.currentFacilityId = bestOption.facility.id; s.progress = bestOption.t;
         }
-      } else {
-        // NO RESCUE LOGIC - Skiers wait here in lines (crowd) until a lift is built
-        // They remain in 'idle' state at their current position.
-        // We do nothing, preserving s.x and s.y.
-      }
+      } 
     } else if (s.state === 'waiting') {
-      // Logic handled in boarding update. 
-      // Ensure skier is in queue if for some reason popped out (reactivity fix)
       const f = newFacilities.find(fac => fac.id === s.currentFacilityId);
-      if (f && !f.queue.includes(s.id)) {
-        // If they are waiting but not in queue, add them back (unless they just boarded)
-        if (!boardingUpdates.has(s.id)) {
-            f.queue.push(s.id);
-        }
-      }
+      if (f && !f.queue.includes(s.id) && !boardingUpdates.has(s.id)) f.queue.push(s.id);
     } else if (s.state === 'skiing' || s.state === 'lifting') {
       const facility = newFacilities.find(f => f.id === s.currentFacilityId);
       if (facility) {
@@ -502,91 +691,61 @@ export const updateGame = (state: GameState, deltaTime: number): GameState => {
         const wasSkiing = s.state === 'skiing';
         
         if (wasSkiing) {
-          const trailSpeedMultipliers: Record<string, number> = {
-             [TrailDifficulty.MAGIC_CARPET]: 0.5,
-             [TrailDifficulty.GREEN]: 1.0,
-             [TrailDifficulty.BLUE]: 1.2,
-             [TrailDifficulty.BLACK]: 1.44,
-             [TrailDifficulty.DOUBLE_DIAMOND]: 1.73,
-             [TrailDifficulty.PARK]: 1.1
-          };
-          const trailMult = trailSpeedMultipliers[facility.subType as string] || 1;
+          const trailMult = { [TrailDifficulty.GREEN]: 1.0, [TrailDifficulty.BLUE]: 1.2, [TrailDifficulty.BLACK]: 1.44, [TrailDifficulty.DOUBLE_DIAMOND]: 1.73, [TrailDifficulty.PARK]: 1.1 }[facility.subType as string] || 1;
           speed = (BASE_SKI_SPEED * trailMult * SPEED_MULTIPLIERS[s.level] * (s.speedVariance || 1.0)) / len;
           
-          const levelMap: any = { [SkierLevel.BEGINNER]: 0, [SkierLevel.AMATEUR]: 1, [SkierLevel.ADVANCED]: 2, [SkierLevel.EXPERTISE]: 3 };
-          const trailMap: any = { [TrailDifficulty.GREEN]: 0, [TrailDifficulty.BLUE]: 1, [TrailDifficulty.BLACK]: 2, [TrailDifficulty.DOUBLE_DIAMOND]: 3 };
-          const tDifficulty = trailMap[facility.subType] ?? -1;
-          const sSkill = levelMap[s.level];
-          
-          if (tDifficulty > sSkill) {
-             speed *= 0.5; 
-          }
+          // Beginners slow on hard trails
+           const tLvl = { [TrailDifficulty.GREEN]: 0, [TrailDifficulty.BLUE]: 1, [TrailDifficulty.BLACK]: 2, [TrailDifficulty.DOUBLE_DIAMOND]: 3 }[facility.subType] ?? -1;
+           const sLvl = { [SkierLevel.BEGINNER]: 0, [SkierLevel.AMATEUR]: 1, [SkierLevel.ADVANCED]: 2, [SkierLevel.EXPERTISE]: 3 }[s.level];
+           if (tLvl > sLvl) speed *= 0.3; 
 
-          // --- UPDATE: Continuous Promotion Logic ---
-          if (facility.type === FacilityType.TRAIL) {
-             const diff = facility.subType as TrailDifficulty;
-             if (isHardestTrail(s, diff)) {
-                 s.timeOnHardestTrail += dt;
-                 
-                 // Check Promotion
-                 if (s.timeOnHardestTrail >= PROMOTION_TIME_REQUIRED) {
-                     s.timeOnHardestTrail = 0;
-                     
-                     let promoted = false;
-                     if (s.level === SkierLevel.BEGINNER) {
-                       s.level = SkierLevel.AMATEUR;
-                       promoted = true;
-                     } else if (s.level === SkierLevel.AMATEUR) {
-                       s.level = SkierLevel.ADVANCED;
-                       promoted = true;
-                     } else if (s.level === SkierLevel.ADVANCED) {
-                       s.level = SkierLevel.EXPERTISE;
-                       promotedCount += 1;
-                       promoted = true;
-                     }
-
-                     if (promoted) {
-                        const numNew = Math.floor(Math.random() * 2) + 1; 
-                        const startFacility = newFacilities.find(f => f.name === "Holiday Lift") || newFacilities[0];
-                        if (startFacility) {
-                          for(let k=0; k<numNew; k++) {
-                             skiersToAdd.push(createSkier(`s-${Date.now()}-${k}`, startFacility.start, nextLabelIdx + k));
-                          }
-                        }
-                     }
-                 }
-             }
-          }
-
+           // Apply Snow Depth Penalty
+           speed *= snowSpeedMod;
         } else {
-          const isGondola = facility.type === FacilityType.GONDOLA;
-          speed = (isGondola ? GONDOLA_SPEED : LIFT_SPEED) / len;
+          // Check if Lift is Open
+          if (facility.isOpen === false) {
+              speed = 0; // Chair stops moving
+          } else {
+              speed = (facility.type === FacilityType.GONDOLA ? GONDOLA_SPEED : LIFT_SPEED) / len;
+          }
         }
-        
+
+        if (wasSkiing && s.hunger < 30) speed *= 0.5;
+        if (!Number.isFinite(speed)) speed = 0.01;
+
         s.progress += speed * dt;
         
         if (s.progress >= 1) {
-          // Set position to end of facility
-          // Add small jitter so if they wait there, they don't stack perfectly (simulating a crowd)
-          s.x = facility.end.x + (Math.random() - 0.5) * 0.3;
-          s.y = facility.end.y + (Math.random() - 0.5) * 0.3;
-          
-          s.state = 'idle';
-          s.progress = 0;
-          s.currentFacilityId = undefined;
+           if (wasSkiing && facility.type === FacilityType.TRAIL) {
+               // Promotion Logic
+               const subType = facility.subType as TrailDifficulty;
+               const target = getPromotionTarget(s.level);
+               let rideValue = (target === subType) ? 1 : (subType === TrailDifficulty.PARK ? 2 : 0);
+               
+               if (rideValue > 0) {
+                   s.rideCount = (s.rideCount || 0) + rideValue;
+                   const req = PROMOTION_COUNTS[s.level] || 10;
+                   if (s.rideCount >= req) {
+                       s.rideCount = 0;
+                       let promoted = false;
+                       if (s.level === SkierLevel.BEGINNER) { s.level = SkierLevel.AMATEUR; promoted = true; }
+                       else if (s.level === SkierLevel.AMATEUR) { s.level = SkierLevel.ADVANCED; promoted = true; }
+                       else if (s.level === SkierLevel.ADVANCED) { s.level = SkierLevel.EXPERTISE; promotedCount += 1; promoted = true; }
+                   }
+               }
+           }
+           s.x = facility.end.x + (Math.random() - 0.5) * 0.3;
+           s.y = facility.end.y + (Math.random() - 0.5) * 0.3;
+           s.state = 'idle'; s.progress = 0; s.currentFacilityId = undefined;
         }
       } else {
-        s.state = 'idle';
-        s.currentFacilityId = undefined;
+        s.state = 'idle'; s.currentFacilityId = undefined;
       }
     }
-    
     return s;
   });
 
-  if (skiersToAdd.length > 0) {
-     nextLabelIdx += skiersToAdd.length;
-  }
+  if (skiersToAdd.length > 0) nextLabelIdx += skiersToAdd.length;
 
   return {
     ...state,
@@ -596,6 +755,10 @@ export const updateGame = (state: GameState, deltaTime: number): GameState => {
     facilities: newFacilities,
     promotedCount,
     nextSkierLabelIndex: nextLabelIdx,
-    lastSpawnTime
+    lastSpawnTime,
+    isNight,
+    lightOpacity,
+    floatingTexts: newFloatingTexts,
+    snowDepth
   };
 };

@@ -10,10 +10,10 @@ export enum FacilityType {
   TRAIL = 'Trail',
   LIFT = 'Lift',
   GONDOLA = 'Gondola',
+  CAFE = 'Cafe',
 }
 
 export enum TrailDifficulty {
-  MAGIC_CARPET = 'Magic Carpet', // Special type of trail/lift hybrid visual
   GREEN = 'Green',
   BLUE = 'Blue',
   BLACK = 'Black',
@@ -22,7 +22,6 @@ export enum TrailDifficulty {
 }
 
 export enum LiftType {
-  MAGIC_CARPET = 'Magic Carpet', // As a lift mechanism
   CHAIR_1 = 'Single Chair',
   CHAIR_2 = 'Double Chair',
   CHAIR_4 = 'Quad Chair',
@@ -33,17 +32,28 @@ export interface Point {
   y: number;
 }
 
+export interface FloatingText {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  life: number; // 0 to 1
+  color: string;
+}
+
 export interface Facility {
   id: string;
   name: string;
   type: FacilityType;
-  subType: TrailDifficulty | LiftType | 'Gondola';
+  subType: TrailDifficulty | LiftType | 'Gondola' | 'Cafe';
   start: Point;
   end: Point;
   length: number;
   capacity?: number; // Seats per unit
   seats?: number[]; // Positions of seats (0 to length)
   queue: string[]; // Skier IDs waiting
+  createdAt: number; // Timestamp for "New" bonus
+  isOpen?: boolean; // Whether the trail is currently open
 }
 
 export interface Skier {
@@ -54,12 +64,14 @@ export interface Skier {
   y: number;
   targetX?: number;
   targetY?: number;
-  state: 'waiting' | 'skiing' | 'lifting' | 'idle';
+  state: 'waiting' | 'skiing' | 'lifting' | 'idle' | 'eating' | 'resting';
   currentFacilityId?: string; // If on a trail or lift
   progress: number; // 0 to 1 along the facility
-  timeOnHardestTrail: number; // Time in seconds on relevant trails for promotion
+  rideCount: number; // Number of valid runs for promotion
   seatIndex?: number; // 0..N-1 for lifts
   speedVariance: number; // Multiplier for speed (e.g. 0.9 - 1.1)
+  hunger: number; // 0-100, 0 is starving
+  lastRentalPayTime: number; 
 }
 
 export interface GameConfig {
@@ -79,6 +91,12 @@ export interface GameState {
   history: string[]; // Logs
   nextSkierLabelIndex: number;
   lastSpawnTime: number;
+  proPassActive: boolean; // Learning boost
+  isNight: boolean; // True if night time
+  lightOpacity: number; // 0 (Day) to ~0.7 (Night)
+  hotelPosition: Point; // Dynamic based on scope
+  floatingTexts: FloatingText[]; // Animations
+  snowDepth: number; // cm
 }
 
 export interface SavedMap {
@@ -87,4 +105,5 @@ export interface SavedMap {
   date: number;
   backgroundImage: string; // base64
   mountains: Point[][];
+  hotelPosition?: Point;
 }
