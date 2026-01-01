@@ -65,19 +65,31 @@ export const calculateHotelPosition = (mountains: Point[][], gridH: number): Poi
 export const findBestStartPoint = (mountain: Point[]): { start: Point, mid: Point } => {
   if (!mountain || mountain.length === 0) return { start: {x: 80, y: 80}, mid: {x: 80, y: 40} };
 
-  // Find lowest center point for start
-  const sortedByY = [...mountain].sort((a, b) => b.y - a.y);
-  const lowest = sortedByY[0];
-  
-  // Find highest point for mid
-  const highest = [...mountain].sort((a, b) => a.y - b.y)[0];
+  // Calculate bounding box and peak
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity; // Visual Bottom
+  let peakPoint = mountain[0];
+  let minY = Infinity; // Visual Top
 
-  const start = { x: lowest.x, y: lowest.y - 2 };
+  mountain.forEach(p => {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+    if (p.y < minY) {
+        minY = p.y;
+        peakPoint = p;
+    }
+  });
+
+  // Start at middle bottom of the scope
+  const centerX = (minX + maxX) / 2;
+  const start = { x: centerX, y: maxY - 3 }; 
   
-  // Mid point at 60% up the mountain
+  // Mid point halfway to the peak
   const mid = {
-      x: start.x + (highest.x - start.x) * 0.6,
-      y: start.y + (highest.y - start.y) * 0.6
+      x: start.x + (peakPoint.x - start.x) * 0.5,
+      y: start.y + (peakPoint.y - start.y) * 0.5
   };
 
   return { start, mid };
